@@ -31,29 +31,38 @@ object UsbToolHelper {
 
     suspend fun requestPermissionSuspend(context: Context, device: UsbDevice): Boolean =
         suspendCancellableCoroutine { cont ->
-            val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-            if (manager.hasPermission(device)) {
-                cont.resume(true) {}
-                return@suspendCancellableCoroutine
-            }
-            val pendingIntent = PendingIntent.getBroadcast(
-                context, 0, Intent(ACTION_USB_PERMISSION),
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    if (intent.action == ACTION_USB_PERMISSION) {
-                        val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                        if (cont.isActive) cont.resume(granted) {}
-                        try { context.unregisterReceiver(this) } catch (_: Exception) {}
+            try {
+                val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                if (manager.hasPermission(device)) {
+                    cont.resume(true) {}
+                    return@suspendCancellableCoroutine
+                }
+
+                // PENTING: Intent harus eksplisit (setPackage) - Android 14+ (targetSdk 34)
+                // melarang PendingIntent MUTABLE dari Intent implisit, bakal crash kalau nggak.
+                val intent = Intent(ACTION_USB_PERMISSION).setPackage(context.packageName)
+                val pendingIntent = PendingIntent.getBroadcast(
+                    context, 0, intent,
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(ctx: Context, i: Intent) {
+                        if (i.action == ACTION_USB_PERMISSION) {
+                            val granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                            if (cont.isActive) cont.resume(granted) {}
+                            try { context.unregisterReceiver(this) } catch (_: Exception) {}
+                        }
                     }
                 }
+                ContextCompat.registerReceiver(
+                    context, receiver, IntentFilter(ACTION_USB_PERMISSION),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                manager.requestPermission(device, pendingIntent)
+            } catch (e: Exception) {
+                if (cont.isActive) cont.resume(false) {}
             }
-            ContextCompat.registerReceiver(
-                context, receiver, IntentFilter(ACTION_USB_PERMISSION),
-                ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-            manager.requestPermission(device, pendingIntent)
         }
 
     private fun findFastbootInterface(device: UsbDevice): Pair<UsbInterface, Pair<UsbEndpoint, UsbEndpoint>>? {
@@ -76,34 +85,38 @@ object UsbToolHelper {
     }
 
     fun sendFastbootCommand(context: Context, device: UsbDevice, command: String): String {
-        val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val found = findFastbootInterface(device)
-            ?: return "Error: interface fastboot gak ketemu (device belum masuk mode fastboot?)"
-        val (intf, endpoints) = found
-        val (inEp, outEp) = endpoints
-        val connection: UsbDeviceConnection = manager.openDevice(device)
-            ?: return "Error: gagal buka koneksi ke device"
+        return try {
+            val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val found = findFastbootInterface(device)
+                ?: return "Error: interface fastboot gak ketemu (device belum masuk mode fastboot?)"
+            val (intf, endpoints) = found
+            val (inEp, outEp) = endpoints
+            val connection: UsbDeviceConnection = manager.openDevice(device)
+                ?: return "Error: gagal buka koneksi ke device"
 
-        connection.claimInterface(intf, true)
-        try {
-            val cmdBytes = command.toByteArray(Charset.forName("UTF-8"))
-            connection.bulkTransfer(outEp, cmdBytes, cmdBytes.size, TIMEOUT)
+            connection.claimInterface(intf, true)
+            try {
+                val cmdBytes = command.toByteArray(Charset.forName("UTF-8"))
+                connection.bulkTransfer(outEp, cmdBytes, cmdBytes.size, TIMEOUT)
 
-            val buffer = ByteArray(4096)
-            val responses = StringBuilder()
-            var guard = 0
-            while (guard < 20) {
-                val len = connection.bulkTransfer(inEp, buffer, buffer.size, TIMEOUT)
-                if (len <= 0) break
-                val resp = String(buffer, 0, len, Charset.forName("UTF-8"))
-                responses.append(resp).append("\n")
-                if (resp.startsWith("OKAY") || resp.startsWith("FAIL")) break
-                guard++
+                val buffer = ByteArray(4096)
+                val responses = StringBuilder()
+                var guard = 0
+                while (guard < 20) {
+                    val len = connection.bulkTransfer(inEp, buffer, buffer.size, TIMEOUT)
+                    if (len <= 0) break
+                    val resp = String(buffer, 0, len, Charset.forName("UTF-8"))
+                    responses.append(resp).append("\n")
+                    if (resp.startsWith("OKAY") || resp.startsWith("FAIL")) break
+                    guard++
+                }
+                responses.toString().ifBlank { "Tidak ada respons (timeout)" }
+            } finally {
+                connection.releaseInterface(intf)
+                connection.close()
             }
-            return responses.toString().ifBlank { "Tidak ada respons (timeout)" }
-        } finally {
-            connection.releaseInterface(intf)
-            connection.close()
+        } catch (e: Exception) {
+            "Error: ${e.message}"
         }
     }
 
@@ -117,10 +130,6 @@ object UsbToolHelper {
         }
     }
 
-    /**
-     * Protokol resmi AOSP fastboot buat flash:
-     * download:<hexsize> -> device balas DATA -> kirim bytes mentah -> OKAY -> flash:<partition>
-     */
     fun flashPartition(
         context: Context,
         device: UsbDevice,
@@ -129,66 +138,70 @@ object UsbToolHelper {
         size: Long,
         onProgress: (String) -> Unit
     ): String {
-        val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-        val found = findFastbootInterface(device) ?: return "Error: interface fastboot gak ketemu"
-        val (intf, endpoints) = found
-        val (inEp, outEp) = endpoints
-        val connection = manager.openDevice(device) ?: return "Error: gagal buka koneksi"
-        connection.claimInterface(intf, true)
+        return try {
+            val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            val found = findFastbootInterface(device) ?: return "Error: interface fastboot gak ketemu"
+            val (intf, endpoints) = found
+            val (inEp, outEp) = endpoints
+            val connection = manager.openDevice(device) ?: return "Error: gagal buka koneksi"
+            connection.claimInterface(intf, true)
 
-        try {
-            val maxCmd = "getvar:max-download-size".toByteArray()
-            connection.bulkTransfer(outEp, maxCmd, maxCmd.size, TIMEOUT)
-            val maxBuf = ByteArray(256)
-            val maxLen = connection.bulkTransfer(inEp, maxBuf, maxBuf.size, TIMEOUT)
-            if (maxLen > 0) {
-                val maxResp = String(maxBuf, 0, maxLen)
-                val maxSize = parseMaxDownloadSize(maxResp)
-                if (maxSize != null && size > maxSize) {
-                    return "Error: file (${size / 1024 / 1024} MB) lebih gede dari max-download-size device (${maxSize / 1024 / 1024} MB)"
+            try {
+                val maxCmd = "getvar:max-download-size".toByteArray()
+                connection.bulkTransfer(outEp, maxCmd, maxCmd.size, TIMEOUT)
+                val maxBuf = ByteArray(256)
+                val maxLen = connection.bulkTransfer(inEp, maxBuf, maxBuf.size, TIMEOUT)
+                if (maxLen > 0) {
+                    val maxResp = String(maxBuf, 0, maxLen)
+                    val maxSize = parseMaxDownloadSize(maxResp)
+                    if (maxSize != null && size > maxSize) {
+                        return "Error: file (${size / 1024 / 1024} MB) lebih gede dari max-download-size device (${maxSize / 1024 / 1024} MB)"
+                    }
                 }
-            }
 
-            onProgress("Menyiapkan transfer...")
-            val sizeHex = String.format("%08x", size)
-            val downloadCmd = "download:$sizeHex".toByteArray()
-            connection.bulkTransfer(outEp, downloadCmd, downloadCmd.size, TIMEOUT)
+                onProgress("Menyiapkan transfer...")
+                val sizeHex = String.format("%08x", size)
+                val downloadCmd = "download:$sizeHex".toByteArray()
+                connection.bulkTransfer(outEp, downloadCmd, downloadCmd.size, TIMEOUT)
 
-            val buffer = ByteArray(4096)
-            var len = connection.bulkTransfer(inEp, buffer, buffer.size, TIMEOUT)
-            if (len <= 0) return "Error: device gak respon ke download command"
-            val resp = String(buffer, 0, len)
-            if (!resp.startsWith("DATA")) return "Error: device nolak download ($resp)"
+                val buffer = ByteArray(4096)
+                var len = connection.bulkTransfer(inEp, buffer, buffer.size, TIMEOUT)
+                if (len <= 0) return "Error: device gak respon ke download command"
+                val resp = String(buffer, 0, len)
+                if (!resp.startsWith("DATA")) return "Error: device nolak download ($resp)"
 
-            onProgress("Mengirim data (${size / 1024} KB)...")
-            val chunk = ByteArray(16384)
-            while (true) {
-                val read = input.read(chunk)
-                if (read <= 0) break
-                connection.bulkTransfer(outEp, chunk, read, FLASH_TIMEOUT)
-            }
+                onProgress("Mengirim data (${size / 1024} KB)...")
+                val chunk = ByteArray(16384)
+                while (true) {
+                    val read = input.read(chunk)
+                    if (read <= 0) break
+                    connection.bulkTransfer(outEp, chunk, read, FLASH_TIMEOUT)
+                }
 
-            len = connection.bulkTransfer(inEp, buffer, buffer.size, FLASH_TIMEOUT)
-            val finalResp = if (len > 0) String(buffer, 0, len) else ""
-            if (!finalResp.startsWith("OKAY")) return "Error saat transfer: $finalResp"
-
-            onProgress("Flashing ke $partition...")
-            val flashCmd = "flash:$partition".toByteArray()
-            connection.bulkTransfer(outEp, flashCmd, flashCmd.size, TIMEOUT)
-            val responses = StringBuilder()
-            var guard = 0
-            while (guard < 20) {
                 len = connection.bulkTransfer(inEp, buffer, buffer.size, FLASH_TIMEOUT)
-                if (len <= 0) break
-                val r = String(buffer, 0, len)
-                responses.append(r).append("\n")
-                if (r.startsWith("OKAY") || r.startsWith("FAIL")) break
-                guard++
+                val finalResp = if (len > 0) String(buffer, 0, len) else ""
+                if (!finalResp.startsWith("OKAY")) return "Error saat transfer: $finalResp"
+
+                onProgress("Flashing ke $partition...")
+                val flashCmd = "flash:$partition".toByteArray()
+                connection.bulkTransfer(outEp, flashCmd, flashCmd.size, TIMEOUT)
+                val responses = StringBuilder()
+                var guard = 0
+                while (guard < 20) {
+                    len = connection.bulkTransfer(inEp, buffer, buffer.size, FLASH_TIMEOUT)
+                    if (len <= 0) break
+                    val r = String(buffer, 0, len)
+                    responses.append(r).append("\n")
+                    if (r.startsWith("OKAY") || r.startsWith("FAIL")) break
+                    guard++
+                }
+                responses.toString().ifBlank { "Tidak ada respons flash" }
+            } finally {
+                connection.releaseInterface(intf)
+                connection.close()
             }
-            return responses.toString().ifBlank { "Tidak ada respons flash" }
-        } finally {
-            connection.releaseInterface(intf)
-            connection.close()
+        } catch (e: Exception) {
+            "Error: ${e.message}"
         }
     }
 
@@ -201,15 +214,9 @@ object UsbToolHelper {
     fun rebootBootloader(context: Context, device: UsbDevice) =
         sendFastbootCommand(context, device, "reboot-bootloader")
 
-    /** Device-side fastboot cuma nyediain "erase", bukan mkfs penuh kayak fastboot host asli. */
     fun erase(context: Context, device: UsbDevice, partition: String) =
         sendFastbootCommand(context, device, "erase:$partition")
 
-    /**
-     * Unlock/lock resmi lewat protokol fastboot AOSP. Cuma jalan kalau "OEM unlocking"
-     * di Developer Options device itu udah ON, dan vendornya ngizinin. FAIL di sini
-     * artinya proteksi anti-theft vendor lagi aktif, bukan bug.
-     */
     fun flashingUnlock(context: Context, device: UsbDevice) =
         sendFastbootCommand(context, device, "flashing unlock")
 
