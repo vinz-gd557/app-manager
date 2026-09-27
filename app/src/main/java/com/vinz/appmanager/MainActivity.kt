@@ -17,10 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.draw
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import rikka.shizuku.Shizuku
@@ -60,11 +57,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppManagerScreen(viewModel: AppListViewModel) {
     val apps by viewModel.apps.collectAsState()
     val loading by viewModel.loading.collectAsState()
-    val context = LocalContext.current
 
     Box(Modifier.fillMaxSize()) {
         Column {
@@ -99,7 +96,6 @@ fun AppManagerScreen(viewModel: AppListViewModel) {
             }
         }
 
-        // Overlay loading animasi
         AnimatedVisibility(
             visible = loading,
             enter = fadeIn(),

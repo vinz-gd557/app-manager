@@ -7,11 +7,6 @@ import rikka.shizuku.Shizuku
 import java.io.BufferedReader
 import java.io.InputStreamReader
 
-/**
- * Wrapper buat semua operasi yang butuh Shizuku.
- * Semua command dijalanin lewat shell process punya Shizuku,
- * jadi gak butuh root, cukup permission ADB/Shizuku sekali aja.
- */
 object ShizukuHelper {
 
     private const val REQUEST_CODE = 1000
@@ -32,22 +27,33 @@ object ShizukuHelper {
         }
     }
 
-    private fun runShell(vararg cmd: String): String {
-        val process = Shizuku.newProcess(cmd, null, null)
-        val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
-        process.waitFor()
-        return output
+    private fun newShizukuProcess(cmd: Array<String>): Process {
+        val method = Shizuku::class.java.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java
+        )
+        method.isAccessible = true
+        return method.invoke(null, cmd, null, null) as Process
     }
 
-    /** Force-stop langsung, kayak nge-swipe dari recent apps + kill proses. */
+    private fun runShell(vararg cmd: String): String {
+        return try {
+            val process = newShizukuProcess(arrayOf(*cmd))
+            val output = BufferedReader(InputStreamReader(process.inputStream)).readText()
+            process.waitFor()
+            output
+        } catch (e: Exception) {
+            e.printStackTrace()
+            ""
+        }
+    }
+
     fun forceStop(packageName: String) {
         runShell("am", "force-stop", packageName)
     }
 
-    /**
-     * Freeze app: app "dinonaktifkan" sementara tapi data & session TETAP ADA.
-     * Beda sama `pm clear` yang bakal ngehapus data (bikin harus login ulang).
-     */
     fun freeze(packageName: String) {
         runShell("pm", "disable-user", "--user", "0", packageName)
     }
@@ -65,7 +71,6 @@ object ShizukuHelper {
         }
     }
 
-    /** Freeze sekarang, otomatis unfreeze sendiri setelah delayMs (detik/menit sesuai kebutuhan). */
     fun freezeTemporary(packageName: String, delayMs: Long) {
         freeze(packageName)
         Handler(Looper.getMainLooper()).postDelayed({
