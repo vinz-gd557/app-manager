@@ -3,9 +3,15 @@ package com.vinz.appmanager
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import java.io.BufferedReader
+import java.io.ByteArrayInputStream
+import java.io.InputStream
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 
 object ShizukuHelper {
 
@@ -50,6 +56,19 @@ object ShizukuHelper {
         }
     }
 
+    /** Jalanin command bebas lewat shell, buat fitur Terminal. */
+    fun runRaw(command: String): String {
+        return try {
+            val process = newShizukuProcess(arrayOf("sh", "-c", command))
+            val stdout = process.inputStream.bufferedReader().readText()
+            val stderr = process.errorStream.bufferedReader().readText()
+            process.waitFor()
+            listOf(stdout, stderr).filter { it.isNotBlank() }.joinToString("\n")
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+    }
+
     fun forceStop(packageName: String) {
         runShell("am", "force-stop", packageName)
     }
@@ -60,6 +79,10 @@ object ShizukuHelper {
 
     fun unfreeze(packageName: String) {
         runShell("pm", "enable", packageName)
+    }
+
+    fun uninstall(packageName: String) {
+        runShell("pm", "uninstall", packageName)
     }
 
     fun isFrozen(pm: PackageManager, packageName: String): Boolean {
@@ -76,5 +99,53 @@ object ShizukuHelper {
         Handler(Looper.getMainLooper()).postDelayed({
             unfreeze(packageName)
         }, delayMs)
+    }
+
+    /**
+     * Install APK dengan stream langsung ke stdin `pm install`,
+     * gak perlu simpen file APK ke storage dulu (menghindari masalah
+     * permission baca file antara app & proses shell Shizuku).
+     */
+    private fun installApk(input: InputStream, size: Long) {
+        val process = newShizukuProcess(arrayOf("pm", "install", "-r", "-t", "-S", size.toString()))
+        input.use { source ->
+            process.outputStream.use { sink ->
+                source.copyTo(sink)
+            }
+        }
+        process.waitFor()
+    }
+
+    suspend fun installFromUrl(urlString: String, onStatus: (String) -> Unit) {
+        withContext(Dispatchers.IO) {
+            var connection: HttpURLConnection? = null
+            try {
+                onStatus("Mendownload APK...")
+                val url = URL(urlString)
+                connection = url.openConnection() as HttpURLConnection
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 15_000
+                connection.connect()
+
+                if (connection.responseCode !in 200..299) {
+                    onStatus("Gagal download (HTTP ${connection.responseCode})")
+                    return@withContext
+                }
+
+                onStatus("Menginstall...")
+                val size = connection.contentLengthLong
+                if (size > 0) {
+                    installApk(connection.inputStream, size)
+                } else {
+                    val bytes = connection.inputStream.use { it.readBytes() }
+                    installApk(ByteArrayInputStream(bytes), bytes.size.toLong())
+                }
+                onStatus("Berhasil diinstall!")
+            } catch (e: Exception) {
+                onStatus("Error: ${e.message}")
+            } finally {
+                connection?.disconnect()
+            }
+        }
     }
 }

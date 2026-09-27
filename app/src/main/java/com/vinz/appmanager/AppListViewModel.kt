@@ -55,4 +55,8 @@ class AppListViewModel(app: Application) : AndroidViewModel(app) {
             if (it.packageName == packageName) it.copy(isFrozen = frozen) else it
         }
     }
+
+    fun removeApp(packageName: String) {
+        _apps.value = _apps.value.filterNot { it.packageName == packageName }
+    }
 }
