@@ -77,6 +77,8 @@ class MainActivity : ComponentActivity() {
                             Screen.InstallUrl -> InstallUrlScreen(onBack = { screen = Screen.Menu })
 
                             Screen.Terminal -> TerminalScreen(onBack = { screen = Screen.Menu })
+
+                            Screen.DeviceTools -> DeviceToolScreen(onBack = { screen = Screen.Menu })
                         }
                     }
                 }
