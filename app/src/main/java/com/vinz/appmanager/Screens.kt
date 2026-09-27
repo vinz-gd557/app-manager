@@ -35,7 +35,8 @@ sealed class Screen {
     object Uninstall : Screen()
     object InstallUrl : Screen()
     object Terminal : Screen()
-    object DeviceTools : Screen()
+    object Adb : Screen()
+    object Fastboot : Screen()
 }
 
 data class MenuItem(
@@ -54,7 +55,8 @@ fun MainMenuScreen(onNavigate: (Screen) -> Unit) {
             MenuItem("🗑", "Uninstall App", "Hapus app dari device", Screen.Uninstall),
             MenuItem("⬇", "Install via URL", "Download & install APK langsung dari link", Screen.InstallUrl),
             MenuItem("⌨", "Terminal", "Jalanin command shell manual", Screen.Terminal),
-            MenuItem("🔌", "ADB & Fastboot", "Sambungin HP lain lewat OTG buat fastboot command", Screen.DeviceTools)
+            MenuItem("🔌", "ADB", "Deteksi & sambungin device dalam mode ADB", Screen.Adb),
+            MenuItem("⚡", "Fastboot", "Flash, format, unlock/lock bootloader", Screen.Fastboot)
         )
     }
 
@@ -76,12 +78,12 @@ fun MainMenuScreen(onNavigate: (Screen) -> Unit) {
             itemsIndexed(items) { index, item ->
                 var visible by remember { mutableStateOf(false) }
                 LaunchedEffect(Unit) {
-                    delay(index * 70L)
+                    delay(index * 60L)
                     visible = true
                 }
                 AnimatedVisibility(
                     visible = visible,
-                    enter = fadeIn(tween(320)) + slideInVertically(tween(320)) { it / 3 }
+                    enter = fadeIn(tween(300)) + slideInVertically(tween(300)) { it / 3 }
                 ) {
                     MenuCard(item) { onNavigate(item.screen) }
                 }
@@ -312,164 +314,6 @@ fun TerminalScreen(onBack: () -> Unit) {
                 }
             ) {
                 Text("▶", fontSize = 18.sp, color = MaterialTheme.colorScheme.primary)
-            }
-        }
-    }
-}
-
-// ==================== ADB & Fastboot Tool ====================
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun DeviceToolScreen(onBack: () -> Unit) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var devices by remember { mutableStateOf(UsbToolHelper.listDevices(context)) }
-    var selected by remember { mutableStateOf<android.hardware.usb.UsbDevice?>(null) }
-    var connecting by remember { mutableStateOf(false) }
-    var isFastboot by remember { mutableStateOf(false) }
-    var command by remember { mutableStateOf("") }
-    val log = remember { mutableStateListOf<String>() }
-    val scope = rememberCoroutineScope()
-
-    fun refresh() { devices = UsbToolHelper.listDevices(context) }
-
-    fun runCmd(label: String, block: () -> String) {
-        scope.launch {
-            val result = withContext(Dispatchers.IO) { block() }
-            log.add(0, "$label\n$result")
-        }
-    }
-
-    Column(Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("ADB & Fastboot") },
-            navigationIcon = { IconButton(onClick = onBack) { Text("←", fontSize = 18.sp) } },
-            actions = { IconButton(onClick = { refresh() }) { Text("⟳", fontSize = 18.sp) } }
-        )
-
-        if (selected == null) {
-            Column(Modifier.padding(20.dp)) {
-                Text(
-                    "Colokin HP lewat kabel OTG, terus tekan refresh",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
-                Spacer(Modifier.height(16.dp))
-                if (devices.isEmpty()) {
-                    Text("Belum ada device kedetect.")
-                } else {
-                    devices.forEach { dev ->
-                        Card(
-                            onClick = {
-                                connecting = true
-                                scope.launch {
-                                    val granted = UsbToolHelper.requestPermissionSuspend(context, dev)
-                                    connecting = false
-                                    if (granted) {
-                                        selected = dev
-                                        isFastboot = UsbToolHelper.isLikelyFastboot(dev)
-                                    }
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Column(Modifier.padding(14.dp)) {
-                                Text(dev.deviceName, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    "VID: ${dev.vendorId}  PID: ${dev.productId}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                            }
-                        }
-                    }
-                }
-                if (connecting) {
-                    Spacer(Modifier.height(12.dp))
-                    CircularProgressIndicator()
-                }
-            }
-        } else {
-            val dev = selected!!
-            Column(Modifier.padding(16.dp)) {
-                Text("Terhubung: ${dev.deviceName}", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    if (isFastboot) "Mode terdeteksi: Fastboot" else "Mode terdeteksi: bukan Fastboot (kemungkinan ADB)",
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
-                )
-                Spacer(Modifier.height(16.dp))
-
-                if (isFastboot) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { runCmd("getvar product") { UsbToolHelper.getVar(context, dev, "product") } }) {
-                            Text("Get Info")
-                        }
-                        Button(onClick = { runCmd("reboot-bootloader") { UsbToolHelper.rebootBootloader(context, dev) } }) {
-                            Text("Reboot BL")
-                        }
-                        Button(onClick = { runCmd("reboot") { UsbToolHelper.reboot(context, dev) } }) {
-                            Text("Reboot")
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { runCmd("flashing unlock") { UsbToolHelper.flashingUnlock(context, dev) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Text("Flashing Unlock (resmi, butuh OEM unlocking ON)")
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = command,
-                            onValueChange = { command = it },
-                            modifier = Modifier.weight(1f),
-                            placeholder = { Text("getvar:all") },
-                            singleLine = true
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(onClick = {
-                            val c = command.trim()
-                            if (c.isNotEmpty()) {
-                                command = ""
-                                runCmd(c) { UsbToolHelper.sendFastbootCommand(context, dev, c) }
-                            }
-                        }) { Text("▶") }
-                    }
-                } else {
-                    Text(
-                        "Device ini kedetect tapi bukan mode fastboot. Kirim command ADB " +
-                            "butuh implementasi protokol ADB (RSA handshake buat approval " +
-                            "\"Allow USB debugging?\") yang belum ada di sini — kabarin kalau " +
-                            "mau saya lanjutin bagian itu.",
-                        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
-                    )
-                }
-
-                Spacer(Modifier.height(16.dp))
-                TextButton(onClick = { selected = null }) { Text("Putuskan koneksi") }
-            }
-        }
-
-        Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(log) { entry ->
-                Text(
-                    entry,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.85f)
-                )
             }
         }
     }

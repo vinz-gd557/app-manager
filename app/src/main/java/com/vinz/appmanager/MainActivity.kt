@@ -78,7 +78,9 @@ class MainActivity : ComponentActivity() {
 
                             Screen.Terminal -> TerminalScreen(onBack = { screen = Screen.Menu })
 
-                            Screen.DeviceTools -> DeviceToolScreen(onBack = { screen = Screen.Menu })
+                            Screen.Adb -> AdbScreen(onBack = { screen = Screen.Menu })
+
+                            Screen.Fastboot -> FastbootScreen(onBack = { screen = Screen.Menu })
                         }
                     }
                 }
